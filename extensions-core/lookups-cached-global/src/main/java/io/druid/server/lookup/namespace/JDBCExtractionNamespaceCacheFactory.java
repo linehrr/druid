@@ -96,7 +96,6 @@ public class JDBCExtractionNamespaceCacheFactory
                           table
                   );
 
-                  namespace.setLastUpdateTime(lastDBUpdate);
                   LOG.info("JDBC: Performing full updates");
                 }else{
                     if(lastDBUpdate > namespace.getLastUpdateTime()){
@@ -107,15 +106,18 @@ public class JDBCExtractionNamespaceCacheFactory
                               valueColumn,
                               table,
                               tsColumn,
-                              namespace.getLastUpdateTime()/1000L
+                              namespace.getLastUpdateTime()
                       );
                     }else{
+                      // in theory this code is not reachable
+                      // due to previous checks
+                      // this code is here only for return integrity
                       LOG.info("Skip loading JDBC: No updates");
                       return new ArrayList<>();
                     }
 
-                    namespace.setLastUpdateTime(lastDBUpdate);
                 }
+                namespace.setLastUpdateTime(lastDBUpdate);
                 return handle
                     .createQuery(
                         query
