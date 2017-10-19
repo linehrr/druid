@@ -99,7 +99,7 @@ public class JDBCExtractionNamespaceCacheFactory
                   LOG.info("JDBC: Performing full updates");
                 }else{
                     if(lastDBUpdate > namespace.getLastUpdateTime()){
-                      LOG.info("JDBC: Performing partial updates");
+                      LOG.info("JDBC: Performing partial updates after %s", namespace.getLastUpdateTime());
                       query = String.format(
                               "SELECT %s, %s FROM %s WHERE UNIX_TIMESTAMP(%s) > %s",
                               keyColumn,
@@ -142,7 +142,6 @@ public class JDBCExtractionNamespaceCacheFactory
         for (Pair<String, String> pair : pairs) {
           cache.put(pair.lhs, pair.rhs);
         }
-        LOG.info("JDBC updated %s records...", pairs.size());
 
         LOG.info("Finished loading %d values for namespace[%s]", cache.size(), id);
         if (lastDBUpdate != null) {
@@ -178,6 +177,8 @@ public class JDBCExtractionNamespaceCacheFactory
     final DBI dbi = ensureDBI(id, namespace);
     final String table = namespace.getTable();
     final String tsColumn = namespace.getTsColumn();
+    final String LATEST = "latest";
+
     if (tsColumn == null) {
       return null;
     }
@@ -189,8 +190,8 @@ public class JDBCExtractionNamespaceCacheFactory
           public Long withHandle(Handle handle) throws Exception
           {
             final String query = String.format(
-                "SELECT MAX(UNIX_TIMESTAMP(%s)) FROM %s",
-                tsColumn, table
+                "SELECT MAX(UNIX_TIMESTAMP(%s)) AS %s FROM %s",
+                tsColumn, LATEST, table
             );
             return handle
                 .createQuery(query)
@@ -199,7 +200,7 @@ public class JDBCExtractionNamespaceCacheFactory
 
                           @Override
                           public Long map(int i, ResultSet resultSet, StatementContext statementContext) throws SQLException {
-                            return resultSet.getLong(0);
+                            return resultSet.getLong(LATEST);
                           }
                         }
                 ).first();
