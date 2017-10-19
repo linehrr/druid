@@ -30,6 +30,7 @@ import com.metamx.emitter.service.ServiceMetricEvent;
 import io.druid.query.lookup.namespace.ExtractionNamespace;
 import io.druid.query.lookup.namespace.ExtractionNamespaceCacheFactory;
 
+import java.lang.ref.WeakReference;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -41,7 +42,7 @@ import java.util.concurrent.locks.Lock;
 public class OnHeapNamespaceExtractionCacheManager extends NamespaceExtractionCacheManager
 {
   private static final Logger LOG = new Logger(OnHeapNamespaceExtractionCacheManager.class);
-  private final ConcurrentMap<String, ConcurrentMap<String, String>> mapMap = new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, WeakReference<ConcurrentMap<String, String>>> mapMap = new ConcurrentHashMap<>();
   private final Striped<Lock> nsLocks = Striped.lock(32);
 
   @Inject
@@ -60,13 +61,21 @@ public class OnHeapNamespaceExtractionCacheManager extends NamespaceExtractionCa
     final Lock lock = nsLocks.get(namespaceKey);
     lock.lock();
     try {
-      ConcurrentMap<String, String> cacheMap = mapMap.get(cacheKey);
+      ConcurrentMap<String, String> cacheMap = mapMap.get(cacheKey).get();
+
       if (cacheMap == null) {
         throw new IAE("Extraction Cache [%s] does not exist", cacheKey);
       }
-      ConcurrentMap<String, String> prior = mapMap.put(namespaceKey, cacheMap);
+
+      if(mapMap.containsKey(namespaceKey)) {
+        // get previous map to perform merge
+        ConcurrentMap<String, String> preCacheMap = mapMap.get(namespaceKey).get();
+        if(preCacheMap != null) cacheMap.putAll(preCacheMap);
+        LOG.info("JDBC merged previous data[%s, %s]", namespaceKey, cacheKey);
+      }
+      WeakReference<ConcurrentMap<String, String>> prior = mapMap.put(namespaceKey, new WeakReference<>(cacheMap));
       mapMap.remove(cacheKey);
-      if (prior != null) {
+      if (prior.get() != null) {
         // Old map will get GC'd when it is not used anymore
         return true;
       } else {
@@ -81,12 +90,12 @@ public class OnHeapNamespaceExtractionCacheManager extends NamespaceExtractionCa
   @Override
   public ConcurrentMap<String, String> getCacheMap(String namespaceOrCacheKey)
   {
-    ConcurrentMap<String, String> map = mapMap.get(namespaceOrCacheKey);
-    if (map == null) {
-      mapMap.putIfAbsent(namespaceOrCacheKey, new ConcurrentHashMap<String, String>());
+    WeakReference<ConcurrentMap<String, String>> map = mapMap.get(namespaceOrCacheKey);
+    if (map.get() == null) {
+      mapMap.putIfAbsent(namespaceOrCacheKey, new WeakReference<ConcurrentMap<String, String>>(new ConcurrentHashMap<String, String>()));
       map = mapMap.get(namespaceOrCacheKey);
     }
-    return map;
+    return map.get();
   }
 
   @Override
@@ -111,8 +120,8 @@ public class OnHeapNamespaceExtractionCacheManager extends NamespaceExtractionCa
   {
     long numEntries = 0;
     long size = 0;
-    for (Map.Entry<String, ConcurrentMap<String, String>> entry : mapMap.entrySet()) {
-      final ConcurrentMap<String, String> map = entry.getValue();
+    for (Map.Entry<String, WeakReference<ConcurrentMap<String, String>>> entry : mapMap.entrySet()) {
+      final ConcurrentMap<String, String> map = entry.getValue().get();
       if (map == null) {
         LOG.debug("missing cache key for reporting [%s]", entry.getKey());
         continue;

@@ -29,11 +29,10 @@ import org.skife.jdbi.v2.Handle;
 import org.skife.jdbi.v2.StatementContext;
 import org.skife.jdbi.v2.tweak.HandleCallback;
 import org.skife.jdbi.v2.tweak.ResultSetMapper;
-import org.skife.jdbi.v2.util.TimestampMapper;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -79,6 +78,7 @@ public class JDBCExtractionNamespaceCacheFactory
         final String table = namespace.getTable();
         final String valueColumn = namespace.getValueColumn();
         final String keyColumn = namespace.getKeyColumn();
+        final String tsColumn = namespace.getTsColumn();
 
         LOG.debug("Updating [%s]", id);
         final List<Pair<String, String>> pairs = dbi.withHandle(
@@ -88,12 +88,34 @@ public class JDBCExtractionNamespaceCacheFactory
               public List<Pair<String, String>> withHandle(Handle handle) throws Exception
               {
                 final String query;
-                query = String.format(
-                    "SELECT %s, %s FROM %s",
-                    keyColumn,
-                    valueColumn,
-                    table
-                );
+                if(tsColumn == null || namespace.getLastUpdateTime() == null) {
+                  query = String.format(
+                          "SELECT %s, %s FROM %s",
+                          keyColumn,
+                          valueColumn,
+                          table
+                  );
+
+                  namespace.setLastUpdateTime(lastDBUpdate);
+                  LOG.info("JDBC: Performing full updates");
+                }else{
+                    if(lastDBUpdate > namespace.getLastUpdateTime()){
+                      LOG.info("JDBC: Performing partial updates");
+                      query = String.format(
+                              "SELECT %s, %s FROM %s WHERE UNIX_TIMESTAMP(%s) > %s",
+                              keyColumn,
+                              valueColumn,
+                              table,
+                              tsColumn,
+                              namespace.getLastUpdateTime()/1000L
+                      );
+                    }else{
+                      LOG.info("Skip loading JDBC: No updates");
+                      return new ArrayList<>();
+                    }
+
+                    namespace.setLastUpdateTime(lastDBUpdate);
+                }
                 return handle
                     .createQuery(
                         query
@@ -118,6 +140,8 @@ public class JDBCExtractionNamespaceCacheFactory
         for (Pair<String, String> pair : pairs) {
           cache.put(pair.lhs, pair.rhs);
         }
+        LOG.info("JDBC updated %s records...", pairs.size());
+
         LOG.info("Finished loading %d values for namespace[%s]", cache.size(), id);
         if (lastDBUpdate != null) {
           return lastDBUpdate.toString();
@@ -155,25 +179,31 @@ public class JDBCExtractionNamespaceCacheFactory
     if (tsColumn == null) {
       return null;
     }
-    final Timestamp update = dbi.withHandle(
-        new HandleCallback<Timestamp>()
+    final Long update = dbi.withHandle(
+        new HandleCallback<Long>()
         {
 
           @Override
-          public Timestamp withHandle(Handle handle) throws Exception
+          public Long withHandle(Handle handle) throws Exception
           {
             final String query = String.format(
-                "SELECT MAX(%s) FROM %s",
+                "SELECT MAX(UNIX_TIMESTAMP(%s)) FROM %s",
                 tsColumn, table
             );
             return handle
                 .createQuery(query)
-                .map(TimestampMapper.FIRST)
-                .first();
+                .map(
+                        new ResultSetMapper<Long>() {
+
+                          @Override
+                          public Long map(int i, ResultSet resultSet, StatementContext statementContext) throws SQLException {
+                            return resultSet.getLong(0);
+                          }
+                        }
+                ).first();
           }
         }
     );
-    return update.getTime();
-
+    return update;
   }
 }

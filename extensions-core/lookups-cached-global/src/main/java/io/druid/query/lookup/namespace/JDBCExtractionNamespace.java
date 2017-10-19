@@ -49,6 +49,8 @@ public class JDBCExtractionNamespace implements ExtractionNamespace
   @JsonProperty
   private final Period pollPeriod;
 
+  private Long lastUpdateTime;
+
   @JsonCreator
   public JDBCExtractionNamespace(
       @NotNull @JsonProperty(value = "connectorConfig", required = true)
@@ -97,6 +99,14 @@ public class JDBCExtractionNamespace implements ExtractionNamespace
   public String getTsColumn()
   {
     return tsColumn;
+  }
+
+  public Long getLastUpdateTime(){
+    return lastUpdateTime;
+  }
+
+  public void setLastUpdateTime(Long a) {
+    lastUpdateTime = a;
   }
 
   @Override
