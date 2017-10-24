@@ -118,10 +118,18 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
 
       final String priorCache = currentNamespaceCache.put(namespaceKey, swapCacheKey);
       if (priorCache != null) {
+        // get previous map for the merge
+        ConcurrentMap<String, String> previousMap = mmapDB.createHashMap(priorCache).makeOrGet();
+        log.info("OffHeap cache performing hash merge: %s records needs to be merged", previousMap.size());
+
+        // merge the previous map with the new map
+        mmapDB.getHashMap(swapCacheKey).putAll(previousMap);
+        log.info("OffHeap cache merging done");
         // TODO: resolve what happens here if query is actively going on
         mmapDB.delete(priorCache);
         return true;
       } else {
+        log.info("OffHeap cache no merge needed...");
         return false;
       }
     }
@@ -165,7 +173,10 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
         // Not something created by swapAndClearCache
         mapDBKey = namespaceKey;
       }
-      return mmapDB.createHashMap(mapDBKey).makeOrGet();
+
+      ConcurrentMap<String, String> retMap = mmapDB.createHashMap(mapDBKey).makeOrGet();
+      log.info("OffHeapMap loaded(%s): %s", namespaceKey, retMap.size());
+      return retMap;
     }
     finally {
       lock.unlock();
