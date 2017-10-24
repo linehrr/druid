@@ -51,6 +51,12 @@
       <version>${project.parent.version}</version>
       <scope>provided</scope>
     </dependency>
+    <dependency>
+      <groupId>org.mapdb</groupId>
+      <artifactId>mapdb</artifactId>
+      <version>3.0.2</version>
+    </dependency>
+
 
     <!-- Tests -->
     <!--<dependency>-->

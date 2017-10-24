@@ -19,7 +19,6 @@
 
 package io.druid.server.lookup.namespace.cache;
 
-import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.util.concurrent.Striped;
 import com.google.inject.Inject;
@@ -31,13 +30,14 @@ import io.druid.query.lookup.namespace.ExtractionNamespace;
 import io.druid.query.lookup.namespace.ExtractionNamespaceCacheFactory;
 import org.mapdb.DB;
 import org.mapdb.DBMaker;
+import org.mapdb.HTreeMap;
+import org.mapdb.Serializer;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 
 /**
@@ -46,10 +46,12 @@ import java.util.concurrent.locks.Lock;
 public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionCacheManager
 {
   private static final Logger log = new Logger(OffHeapNamespaceExtractionCacheManager.class);
-  private final DB mmapDB;
-  private ConcurrentMap<String, String> currentNamespaceCache = new ConcurrentHashMap<>();
+  private final DB onDiskDB;
+  private final DB inMemDB;
   private Striped<Lock> nsLocks = Striped.lazyWeakLock(1024); // Needed to make sure delete() doesn't do weird things
   private final File tmpFile;
+
+  private final String mapDBKey = "MAPDB";
 
   @Inject
   public OffHeapNamespaceExtractionCacheManager(
@@ -66,17 +68,16 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     catch (IOException e) {
       throw Throwables.propagate(e);
     }
-    mmapDB = DBMaker
-        .newFileDB(tmpFile)
+    onDiskDB = DBMaker
+        .fileDB(tmpFile)
+        .fileDeleteAfterClose()
         .closeOnJvmShutdown()
-        .transactionDisable()
-        .deleteFilesAfterClose()
-        .strictDBGet()
-        .asyncWriteEnable()
-        .mmapFileEnable()
-        .commitFileSyncDisable()
-        .cacheSize(10_000_000)
         .make();
+
+    inMemDB = DBMaker
+            .memoryDB()
+            .make();
+
     try {
       lifecycle.addMaybeStartHandler(
           new Lifecycle.Handler()
@@ -90,11 +91,15 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
             @Override
             public synchronized void stop()
             {
-              if (!mmapDB.isClosed()) {
-                mmapDB.close();
+              if (!onDiskDB.isClosed()) {
+                onDiskDB.close();
                 if (!tmpFile.delete()) {
                   log.warn("Unable to delete file at [%s]", tmpFile.getAbsolutePath());
                 }
+              }
+
+              if(!inMemDB.isClosed()) {
+                inMemDB.close();
               }
             }
           }
@@ -108,59 +113,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   @Override
   protected boolean swapAndClearCache(String namespaceKey, String cacheKey)
   {
-    final Lock lock = nsLocks.get(namespaceKey);
-    lock.lock();
-    try {
-      Preconditions.checkArgument(mmapDB.exists(cacheKey), "Namespace [%s] does not exist", cacheKey);
-
-      final String swapCacheKey = UUID.randomUUID().toString();
-      mmapDB.rename(cacheKey, swapCacheKey);
-
-      final String priorCache = currentNamespaceCache.put(namespaceKey, swapCacheKey);
-      if (priorCache != null) {
-        // get previous map for the merge
-        ConcurrentMap<String, String> previousMap = mmapDB.createHashMap(priorCache).makeOrGet();
-        log.info("OffHeap cache performing hash merge: %s records needs to be merged", previousMap.size());
-
-        // merge the previous map with the new map
-        // note: getHashMap returns mutable Map<?> extends ConcurrentMap<?>
-        mmapDB.getHashMap(swapCacheKey).putAll(previousMap);
-        log.info("OffHeap cache merging done");
-        // TODO: resolve what happens here if query is actively going on
-        mmapDB.delete(priorCache);
-        return true;
-      } else {
-        log.info("OffHeap cache no merge needed...");
-        return false;
-      }
-    }
-    finally {
-      lock.unlock();
-    }
-  }
-
-  @Override
-  public boolean delete(final String namespaceKey)
-  {
-    // `super.delete` has a synchronization in it, don't call it in the lock.
-    if (!super.delete(namespaceKey)) {
-      return false;
-    }
-    final Lock lock = nsLocks.get(namespaceKey);
-    lock.lock();
-    try {
-      final String mmapDBkey = currentNamespaceCache.remove(namespaceKey);
-      if (mmapDBkey == null) {
-        return false;
-      }
-      final long pre = tmpFile.length();
-      mmapDB.delete(mmapDBkey);
-      log.debug("MapDB file size: pre %d  post %d", pre, tmpFile.length());
       return true;
-    }
-    finally {
-      lock.unlock();
-    }
   }
 
   @Override
@@ -169,14 +122,24 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     final Lock lock = nsLocks.get(namespaceKey);
     lock.lock();
     try {
-      String mapDBKey = currentNamespaceCache.get(namespaceKey);
-      if (mapDBKey == null) {
-        // Not something created by swapAndClearCache
-        mapDBKey = namespaceKey;
-      }
 
-      ConcurrentMap<String, String> retMap = mmapDB.createHashMap(mapDBKey).makeOrGet();
-      log.info("OffHeapMap loaded(%s): %s", namespaceKey, retMap.size());
+      HTreeMap<String, String> onDiskMap = onDiskDB
+              .hashMap(mapDBKey)
+              .keySerializer(Serializer.STRING)   // specify KV serde for performance
+              .valueSerializer(Serializer.STRING)
+              .counterEnable()
+              .createOrOpen();
+
+      ConcurrentMap<String, String> retMap = inMemDB
+              .hashMap(mapDBKey)
+              .keySerializer(Serializer.STRING)   // specify KV serde for performance
+              .valueSerializer(Serializer.STRING)
+              .counterEnable()  // enable counter for size() call
+              .expireAfterGet(1L, TimeUnit.DAYS)
+              .expireOverflow(onDiskMap)
+              .createOrOpen();
+
+      log.info("OffHeapMap loaded(%s): inMem: %s, onDisk: %s", namespaceKey, retMap.size(), onDiskMap.size());
       return retMap;
     }
     finally {
