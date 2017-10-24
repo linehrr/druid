@@ -123,6 +123,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
         log.info("OffHeap cache performing hash merge: %s records needs to be merged", previousMap.size());
 
         // merge the previous map with the new map
+        // note: getHashMap returns mutable Map<?> extends ConcurrentMap<?>
         mmapDB.getHashMap(swapCacheKey).putAll(previousMap);
         log.info("OffHeap cache merging done");
         // TODO: resolve what happens here if query is actively going on
