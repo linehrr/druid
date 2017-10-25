@@ -34,6 +34,7 @@ import org.mapdb.Serializer;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -51,7 +52,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   private Striped<Lock> nsLocks = Striped.lazyWeakLock(1024); // Needed to make sure delete() doesn't do weird things
   private final File tmpFile;
 
-  private final ConcurrentMap<String, ConcurrentMap<String, String>> swapMaps = new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, WeakReference<ConcurrentMap<String, String>>> swapMaps = new ConcurrentHashMap<>();
 
   @Inject
   public OffHeapNamespaceExtractionCacheManager(
@@ -115,7 +116,18 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   @Override
   protected boolean swapAndClearCache(String namespaceKey, String cacheKey)
   {
-    ConcurrentMap<String, String> map = swapMaps.get(cacheKey);
+    ConcurrentMap<String, String> map;
+    if(swapMaps.get(cacheKey) != null) {
+      map = swapMaps.get(cacheKey).get();
+    }else{
+      log.wtf("Why I can't find the hashmap I just loaded(namespace: %s, cacheKey: %s)", namespaceKey, cacheKey);
+      return false;
+    }
+
+    if(map == null){
+      log.error("cacheKey(%s) is null so cannot load incrementals", cacheKey);
+      return false;
+    }
 
     if(!onDiskDB.exists(namespaceKey)) {
       ConcurrentMap<String, String> onDiskMap = onDiskDB
@@ -184,7 +196,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
         return inMemMap;
       }else{
         ConcurrentMap<String, String> map = new ConcurrentHashMap<>();
-        swapMaps.put(namespaceKey, map);
+        swapMaps.put(namespaceKey, new WeakReference<>(map));
         return map;
       }
     }
