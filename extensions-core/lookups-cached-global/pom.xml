@@ -55,8 +55,8 @@
       <groupId>org.mapdb</groupId>
       <artifactId>mapdb</artifactId>
       <version>3.0.2</version>
+      <scope>compile</scope>
     </dependency>
-
 
     <!-- Tests -->
     <!--<dependency>-->
@@ -88,4 +88,28 @@
       <!--<scope>test</scope>-->
     <!--</dependency>-->
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>copy-dependencies</id>
+            <phase>prepare-package</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+              <overWriteReleases>false</overWriteReleases>
+              <overWriteSnapshots>false</overWriteSnapshots>
+              <overWriteIfNewer>true</overWriteIfNewer>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>

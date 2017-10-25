@@ -61,12 +61,13 @@ public class OnHeapNamespaceExtractionCacheManager extends NamespaceExtractionCa
     final Lock lock = nsLocks.get(namespaceKey);
     lock.lock();
     try {
-      ConcurrentMap<String, String> cacheMap = mapMap.get(cacheKey).get();
+      WeakReference<ConcurrentMap<String, String>> cacheMapRef = mapMap.get(cacheKey);
 
-      if (cacheMap == null) {
+      if (cacheMapRef == null) {
         throw new IAE("Extraction Cache [%s] does not exist", cacheKey);
       }
 
+      ConcurrentMap<String, String> cacheMap = cacheMapRef.get();
       if(mapMap.containsKey(namespaceKey)) {
         // get previous map to perform merge
         ConcurrentMap<String, String> preCacheMap = mapMap.get(namespaceKey).get();
@@ -91,7 +92,7 @@ public class OnHeapNamespaceExtractionCacheManager extends NamespaceExtractionCa
   public ConcurrentMap<String, String> getCacheMap(String namespaceOrCacheKey)
   {
     WeakReference<ConcurrentMap<String, String>> map = mapMap.get(namespaceOrCacheKey);
-    if (map.get() == null) {
+    if (map == null) {
       mapMap.putIfAbsent(namespaceOrCacheKey, new WeakReference<ConcurrentMap<String, String>>(new ConcurrentHashMap<String, String>()));
       map = mapMap.get(namespaceOrCacheKey);
     }

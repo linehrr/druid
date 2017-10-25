@@ -30,12 +30,12 @@ import io.druid.query.lookup.namespace.ExtractionNamespace;
 import io.druid.query.lookup.namespace.ExtractionNamespaceCacheFactory;
 import org.mapdb.DB;
 import org.mapdb.DBMaker;
-import org.mapdb.HTreeMap;
 import org.mapdb.Serializer;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
@@ -51,7 +51,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   private Striped<Lock> nsLocks = Striped.lazyWeakLock(1024); // Needed to make sure delete() doesn't do weird things
   private final File tmpFile;
 
-  private final String mapDBKey = "MAPDB";
+  private final ConcurrentMap<String, ConcurrentMap<String, String>> swapMaps = new ConcurrentHashMap<>();
 
   @Inject
   public OffHeapNamespaceExtractionCacheManager(
@@ -63,6 +63,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     super(lifecycle, emitter, namespaceFunctionFactoryMap);
     try {
       tmpFile = File.createTempFile("druidMapDB", getClass().getCanonicalName());
+      tmpFile.delete();
       log.info("Using file [%s] for mapDB off heap namespace cache", tmpFile.getAbsolutePath());
     }
     catch (IOException e) {
@@ -70,6 +71,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     }
     onDiskDB = DBMaker
         .fileDB(tmpFile)
+        .fileMmapEnableIfSupported()
         .fileDeleteAfterClose()
         .closeOnJvmShutdown()
         .make();
@@ -113,7 +115,45 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   @Override
   protected boolean swapAndClearCache(String namespaceKey, String cacheKey)
   {
-      return true;
+    ConcurrentMap<String, String> map = swapMaps.get(cacheKey);
+
+    if(!onDiskDB.exists(namespaceKey)) {
+      ConcurrentMap<String, String> onDiskMap = onDiskDB
+              .hashMap(namespaceKey)
+              .counterEnable()
+              .keySerializer(Serializer.STRING)
+              .valueSerializer(Serializer.STRING)
+              .createOrOpen();
+
+      ConcurrentMap<String, String> inMemMap = inMemDB
+              .hashMap(namespaceKey)
+              .counterEnable()
+              .keySerializer(Serializer.STRING)
+              .valueSerializer(Serializer.STRING)
+              .expireAfterGet(1L, TimeUnit.DAYS)
+              .expireOverflow(onDiskMap)
+              .createOrOpen();
+
+      onDiskMap.putAll(map);
+
+      log.info("Created Map(namespace: %s, inMem: %s, onDisk: %s)", namespaceKey, inMemMap.size(), onDiskMap.size());
+    }else {
+
+      ConcurrentMap<String, String> onDiskMap = onDiskDB
+              .hashMap(namespaceKey)
+              .counterEnable()
+              .keySerializer(Serializer.STRING)
+              .valueSerializer(Serializer.STRING)
+              .createOrOpen();
+
+
+      onDiskMap.putAll(map);
+      log.info("Namespace: %s, %s keys swapped in, onDisk total: %s", namespaceKey, map.size(), onDiskMap.size());
+
+    }
+
+    swapMaps.remove(cacheKey);
+    return true;
   }
 
   @Override
@@ -122,25 +162,31 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     final Lock lock = nsLocks.get(namespaceKey);
     lock.lock();
     try {
+      if(inMemDB.exists(namespaceKey)) {
+        ConcurrentMap<String, String> onDiskMap = onDiskDB
+                .hashMap(namespaceKey)
+                .counterEnable()
+                .keySerializer(Serializer.STRING)
+                .valueSerializer(Serializer.STRING)
+                .open();
 
-      HTreeMap<String, String> onDiskMap = onDiskDB
-              .hashMap(mapDBKey)
-              .keySerializer(Serializer.STRING)   // specify KV serde for performance
-              .valueSerializer(Serializer.STRING)
-              .counterEnable()
-              .createOrOpen();
+        ConcurrentMap<String, String> inMemMap = inMemDB
+                .hashMap(namespaceKey)
+                .counterEnable()
+                .keySerializer(Serializer.STRING)
+                .valueSerializer(Serializer.STRING)
+                .expireAfterGet(1L, TimeUnit.DAYS)
+                .expireOverflow(onDiskMap)
+                .open();
 
-      ConcurrentMap<String, String> retMap = inMemDB
-              .hashMap(mapDBKey)
-              .keySerializer(Serializer.STRING)   // specify KV serde for performance
-              .valueSerializer(Serializer.STRING)
-              .counterEnable()  // enable counter for size() call
-              .expireAfterGet(1L, TimeUnit.DAYS)
-              .expireOverflow(onDiskMap)
-              .createOrOpen();
+        log.info("OffHeapMap loaded(%s): inMem: %s, onDisk: %s", namespaceKey, inMemMap.size(), onDiskMap.size());
 
-      log.info("OffHeapMap loaded(%s): inMem: %s, onDisk: %s", namespaceKey, retMap.size(), onDiskMap.size());
-      return retMap;
+        return inMemMap;
+      }else{
+        ConcurrentMap<String, String> map = new ConcurrentHashMap<>();
+        swapMaps.put(namespaceKey, map);
+        return map;
+      }
     }
     finally {
       lock.unlock();
