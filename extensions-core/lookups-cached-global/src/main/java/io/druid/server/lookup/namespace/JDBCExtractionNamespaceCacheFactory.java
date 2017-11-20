@@ -19,25 +19,26 @@
 
 package io.druid.server.lookup.namespace;
 
-import com.metamx.common.Pair;
 import com.metamx.common.logger.Logger;
 import io.druid.common.utils.JodaUtils;
 import io.druid.query.lookup.namespace.ExtractionNamespaceCacheFactory;
 import io.druid.query.lookup.namespace.JDBCExtractionNamespace;
+import jdk.nashorn.internal.ir.debug.ObjectSizeCalculator;
 import org.skife.jdbi.v2.DBI;
 import org.skife.jdbi.v2.Handle;
 import org.skife.jdbi.v2.StatementContext;
 import org.skife.jdbi.v2.tweak.HandleCallback;
 import org.skife.jdbi.v2.tweak.ResultSetMapper;
 
+import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.List;
+import java.sql.Statement;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  *
@@ -56,6 +57,8 @@ public class JDBCExtractionNamespaceCacheFactory
       final Map<String, String> cache
   )
   {
+
+    final AtomicLong jdbcPullCounter = new AtomicLong(0L);
     final long lastCheck = lastVersion == null ? JodaUtils.MIN_INSTANT : Long.parseLong(lastVersion);
     final Long lastDBUpdate = lastUpdates(id, namespace);
     if (lastDBUpdate != null && lastDBUpdate <= lastCheck) {
@@ -81,11 +84,12 @@ public class JDBCExtractionNamespaceCacheFactory
         final String tsColumn = namespace.getTsColumn();
 
         LOG.debug("Updating [%s]", id);
-        final List<Pair<String, String>> pairs = dbi.withHandle(
-            new HandleCallback<List<Pair<String, String>>>()
+
+        final Long jdbcRetrievedRecordsCounter = dbi.withHandle(
+            new HandleCallback<Long>()
             {
               @Override
-              public List<Pair<String, String>> withHandle(Handle handle) throws Exception
+              public Long withHandle(Handle handle) throws Exception
               {
                 final String query;
                 if(tsColumn == null || namespace.getLastUpdateTime() == null) {
@@ -96,7 +100,7 @@ public class JDBCExtractionNamespaceCacheFactory
                           table
                   );
 
-                  LOG.info("JDBC: Performing full updates");
+                  LOG.info("JDBC: Performing full updates(table: %s, k: %s, v: %s)", table, keyColumn, valueColumn);
                 }else{
                     if(lastDBUpdate > namespace.getLastUpdateTime()){
                       LOG.info("JDBC: Performing partial updates after %s", namespace.getLastUpdateTime());
@@ -113,37 +117,71 @@ public class JDBCExtractionNamespaceCacheFactory
                       // due to previous checks
                       // this code is here only for return integrity
                       LOG.info("Skip loading JDBC: No updates");
-                      return new ArrayList<>();
+                      return 0L;
                     }
 
                 }
-                namespace.setLastUpdateTime(lastDBUpdate);
-                return handle
-                    .createQuery(
-                        query
-                    ).map(
-                        new ResultSetMapper<Pair<String, String>>()
-                        {
 
-                          @Override
-                          public Pair<String, String> map(
-                              final int index,
-                              final ResultSet r,
-                              final StatementContext ctx
-                          ) throws SQLException
-                          {
-                            return new Pair<String, String>(r.getString(keyColumn), r.getString(valueColumn));
-                          }
-                        }
-                    ).list();
+                /*
+                THIS CODE CAN CAUSE JDBC CLIENT OOM
+                PULLING ALL RECORDS BACK TO CLIENT MEM IS NOT GOOD
+                USE CURSOR INSTEAD
+                 */
+//                handle
+//                    .createQuery(
+//                        query
+//                    ).map(
+//                        new ResultSetMapper<Pair<String, String>>()
+//                        {
+//
+//                          @Override
+//                          public Pair<String, String> map(
+//                              final int index,
+//                              final ResultSet r,
+//                              final StatementContext ctx
+//                          ) throws SQLException
+//                          {
+//                            jdbcPullCounter.addAndGet(1L);
+//                            cache.put(r.getString(keyColumn), r.getString(valueColumn));
+//                            r.close();
+//                            return new Pair<>(null, null);
+//                          }
+//                        }
+//                    ).list();
+
+                  try {
+                    Connection conn = handle.getConnection();
+                    conn.setAutoCommit(false);
+                    conn.setReadOnly(true);
+
+                    Statement st = conn.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+
+                    st.setFetchSize(100_000);
+                    ResultSet res = st.executeQuery(query);
+
+                    LOG.info("ResultSet size: %s", ObjectSizeCalculator.getObjectSize(res));
+
+                    while (res.next()) {
+                      jdbcPullCounter.addAndGet(1L);
+                      cache.put(res.getString(keyColumn), res.getString(valueColumn));
+                    }
+
+                    res.close();
+                    st.close();
+                    conn.close();
+
+                    // only update lastUpdateTime when loading succeeded
+                    namespace.setLastUpdateTime(lastDBUpdate);
+                  }catch(Exception e){
+                    throw e;
+                  }
+
+                return jdbcPullCounter.get();
               }
             }
         );
-        for (Pair<String, String> pair : pairs) {
-          cache.put(pair.lhs, pair.rhs);
-        }
 
-        LOG.info("Finished loading %d values for namespace[%s]", cache.size(), id);
+        LOG.info("Finished loading %d values for namespace[%s], JDBC retrieved %s", cache.size(), id, jdbcRetrievedRecordsCounter);
         if (lastDBUpdate != null) {
           return lastDBUpdate.toString();
         } else {
