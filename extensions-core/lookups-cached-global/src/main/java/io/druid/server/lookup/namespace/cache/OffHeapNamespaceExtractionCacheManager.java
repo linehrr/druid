@@ -171,6 +171,12 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   @Override
   public ConcurrentMap<String, String> getCacheMap(String namespaceKey)
   {
+
+    // If this is for loading into map, namespaceKey is random generated from Druid
+    // thus we won't find it in inMemDB, so we create a temp ConcurrentMap as a holder
+    // later in func:swapAndClearCache() we will swap it into mapDB
+    // If this is for reading, then it's a known namespaceKey and we will be able to find it in our mapDB
+
     final Lock lock = nsLocks.get(namespaceKey);
     lock.lock();
     try {
