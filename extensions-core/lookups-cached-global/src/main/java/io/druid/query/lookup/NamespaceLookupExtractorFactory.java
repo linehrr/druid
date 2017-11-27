@@ -208,19 +208,13 @@ public class NamespaceLookupExtractorFactory implements LookupExtractorFactory
       String preVersion = null, postVersion = null;
       Map<String, String> map = null;
       // Make sure we absolutely know what version of map we grabbed (for caching purposes)
-      do {
-        preVersion = manager.getVersion(extractorID);
-        if (preVersion == null) {
-          throw new ISE("Namespace vanished for [%s]", extractorID);
-        }
         map = manager.getCacheMap(extractorID);
         postVersion = manager.getVersion(extractorID);
         if (postVersion == null) {
-          // We lost some horrible race... make sure we clean up
-          manager.delete(extractorID);
-          throw new ISE("Lookup [%s] is deleting", extractorID);
+          // We are still loading, return a dummy map for now
+          LOG.warn("Still loading namespace [%s], return partial data", extractorID);
+          postVersion = "PENDING";
         }
-      } while (!preVersion.equals(postVersion));
       final byte[] v = StringUtils.toUtf8(postVersion);
       final byte[] id = StringUtils.toUtf8(extractorID);
       return new MapLookupExtractor(map, isInjective())
@@ -237,8 +231,7 @@ public class NamespaceLookupExtractorFactory implements LookupExtractorFactory
               .array();
         }
       };
-    }
-    finally {
+    } finally {
       readLock.unlock();
     }
   }
