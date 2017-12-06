@@ -260,8 +260,8 @@ public class CliPeon extends GuiceRunnable
           }
         },
         new IndexingServiceFirehoseModule(),
-        new ChatHandlerServerModule(properties)
-//        new LookupModule()
+        new ChatHandlerServerModule(properties),
+        new LookupModule()
     );
   }
 
