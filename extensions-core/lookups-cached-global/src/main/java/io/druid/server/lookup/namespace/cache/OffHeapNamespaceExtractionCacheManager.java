@@ -116,99 +116,13 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   @Override
   protected boolean swapAndClearCache(String namespaceKey, String cacheKey)
   {
-    ConcurrentMap<String, String> map;
-    if(swapMaps.get(cacheKey) != null) {
-      map = swapMaps.get(cacheKey).get();
-    }else{
-      log.wtf("Why I can't find the hashmap I just loaded(namespace: %s, cacheKey: %s)", namespaceKey, cacheKey);
-      return false;
-    }
-
-    if(map == null){
-      log.error("cacheKey(%s) is null so cannot load incrementals", cacheKey);
-      return false;
-    }
-
-    if(!onDiskDB.exists(namespaceKey)) {
-      ConcurrentMap<String, String> onDiskMap = onDiskDB
-              .hashMap(namespaceKey)
-              .counterEnable()
-              .keySerializer(Serializer.STRING)
-              .valueSerializer(Serializer.STRING)
-              .createOrOpen();
-
-      ConcurrentMap<String, String> inMemMap = inMemDB
-              .hashMap(namespaceKey)
-              .counterEnable()
-              .keySerializer(Serializer.STRING)
-              .valueSerializer(Serializer.STRING)
-              .expireAfterGet(1L, TimeUnit.DAYS)
-              .expireOverflow(onDiskMap)
-              .createOrOpen();
-
-      onDiskMap.putAll(map);
-
-      log.info("Created Map(namespace: %s, inMem: %s, onDisk: %s)", namespaceKey, inMemMap.size(), onDiskMap.size());
-    }else {
-
-      ConcurrentMap<String, String> onDiskMap = onDiskDB
-              .hashMap(namespaceKey)
-              .counterEnable()
-              .keySerializer(Serializer.STRING)
-              .valueSerializer(Serializer.STRING)
-              .createOrOpen();
-
-
-      onDiskMap.putAll(map);
-      log.info("Namespace: %s, %s keys swapped in, onDisk total: %s", namespaceKey, map.size(), onDiskMap.size());
-
-    }
-
-    swapMaps.remove(cacheKey);
     return true;
   }
 
   @Override
   public ConcurrentMap<String, String> getCacheMap(String namespaceKey)
   {
-
-    // If this is for loading into map, namespaceKey is random generated from Druid
-    // thus we won't find it in inMemDB, so we create a temp ConcurrentMap as a holder
-    // later in func:swapAndClearCache() we will swap it into mapDB
-    // If this is for reading, then it's a known namespaceKey and we will be able to find it in our mapDB
-
-    final Lock lock = nsLocks.get(namespaceKey);
-    lock.lock();
-    try {
-      if(inMemDB.exists(namespaceKey)) {
-        ConcurrentMap<String, String> onDiskMap = onDiskDB
-                .hashMap(namespaceKey)
-                .counterEnable()
-                .keySerializer(Serializer.STRING)
-                .valueSerializer(Serializer.STRING)
-                .open();
-
-        ConcurrentMap<String, String> inMemMap = inMemDB
-                .hashMap(namespaceKey)
-                .counterEnable()
-                .keySerializer(Serializer.STRING)
-                .valueSerializer(Serializer.STRING)
-                .expireAfterGet(1L, TimeUnit.DAYS)
-                .expireOverflow(onDiskMap)
-                .open();
-
-        log.info("OffHeapMap loaded(%s): inMem: %s, onDisk: %s", namespaceKey, inMemMap.size(), onDiskMap.size());
-
-        return inMemMap;
-      }else{
-        ConcurrentMap<String, String> map = new ConcurrentHashMap<>();
-        swapMaps.put(namespaceKey, new WeakReference<>(map));
-        return map;
-      }
-    }
-    finally {
-      lock.unlock();
-    }
+      return new ConcurrentHashMap<>();
   }
 
   @Override
