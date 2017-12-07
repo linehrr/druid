@@ -20,25 +20,21 @@
 package io.druid.server.lookup.namespace;
 
 import com.metamx.common.logger.Logger;
-import io.druid.common.utils.JodaUtils;
 import io.druid.query.lookup.namespace.ExtractionNamespaceCacheFactory;
 import io.druid.query.lookup.namespace.JDBCExtractionNamespace;
-import jdk.nashorn.internal.ir.debug.ObjectSizeCalculator;
+import io.druid.server.lookup.namespace.cache.OffHeapNamespaceExtractionCacheManager;
 import org.skife.jdbi.v2.DBI;
 import org.skife.jdbi.v2.Handle;
 import org.skife.jdbi.v2.StatementContext;
 import org.skife.jdbi.v2.tweak.HandleCallback;
 import org.skife.jdbi.v2.tweak.ResultSetMapper;
 
-import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  *
@@ -62,7 +58,14 @@ public class JDBCExtractionNamespaceCacheFactory
       @Override
       public String call() throws Exception
       {
-        return "DUMMY";
+        ((OffHeapNamespaceExtractionCacheManager.JDBCcallbackMap)cache)
+                .setKeyCol(namespace.getKeyColumn())
+                .setTable(namespace.getTable())
+                .setValueCol(namespace.getValueColumn())
+                .setDBI(ensureDBI(id, namespace));
+
+        LOG.info("Setup %s-%s-%s ready!", namespace.getTable(), namespace.getKeyColumn(), namespace.getValueColumn());
+        return String.format("%s-%s-%s", namespace.getTable(), namespace.getKeyColumn(), namespace.getValueColumn());
       }
     };
   }

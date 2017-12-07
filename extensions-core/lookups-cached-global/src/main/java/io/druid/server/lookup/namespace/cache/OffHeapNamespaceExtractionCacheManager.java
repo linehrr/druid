@@ -25,20 +25,18 @@ import com.google.inject.Inject;
 import com.metamx.common.lifecycle.Lifecycle;
 import com.metamx.common.logger.Logger;
 import com.metamx.emitter.service.ServiceEmitter;
-import com.metamx.emitter.service.ServiceMetricEvent;
 import io.druid.query.lookup.namespace.ExtractionNamespace;
 import io.druid.query.lookup.namespace.ExtractionNamespaceCacheFactory;
-import org.mapdb.DB;
-import org.mapdb.DBMaker;
-import org.mapdb.Serializer;
+import org.jetbrains.annotations.NotNull;
+import org.skife.jdbi.v2.DBI;
 
-import java.io.File;
-import java.io.IOException;
 import java.lang.ref.WeakReference;
+import java.sql.*;
+import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 
 /**
@@ -47,10 +45,7 @@ import java.util.concurrent.locks.Lock;
 public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionCacheManager
 {
   private static final Logger log = new Logger(OffHeapNamespaceExtractionCacheManager.class);
-  private final DB onDiskDB;
-  private final DB inMemDB;
   private Striped<Lock> nsLocks = Striped.lazyWeakLock(1024); // Needed to make sure delete() doesn't do weird things
-  private final File tmpFile;
 
   private final ConcurrentMap<String, WeakReference<ConcurrentMap<String, String>>> swapMaps = new ConcurrentHashMap<>();
 
@@ -62,24 +57,6 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   )
   {
     super(lifecycle, emitter, namespaceFunctionFactoryMap);
-    try {
-      tmpFile = File.createTempFile("druidMapDB", getClass().getCanonicalName());
-      tmpFile.delete();
-      log.info("Using file [%s] for mapDB off heap namespace cache", tmpFile.getAbsolutePath());
-    }
-    catch (IOException e) {
-      throw Throwables.propagate(e);
-    }
-    onDiskDB = DBMaker
-        .fileDB(tmpFile)
-        .fileMmapEnableIfSupported()
-        .fileDeleteAfterClose()
-        .closeOnJvmShutdown()
-        .make();
-
-    inMemDB = DBMaker
-            .memoryDB()
-            .make();
 
     try {
       lifecycle.addMaybeStartHandler(
@@ -94,16 +71,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
             @Override
             public synchronized void stop()
             {
-              if (!onDiskDB.isClosed()) {
-                onDiskDB.close();
-                if (!tmpFile.delete()) {
-                  log.warn("Unable to delete file at [%s]", tmpFile.getAbsolutePath());
-                }
-              }
-
-              if(!inMemDB.isClosed()) {
-                inMemDB.close();
-              }
+              // NOOP
             }
           }
       );
@@ -116,18 +84,167 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   @Override
   protected boolean swapAndClearCache(String namespaceKey, String cacheKey)
   {
+    swapMaps.put(namespaceKey, swapMaps.get(cacheKey));
+    swapMaps.remove(cacheKey);
     return true;
   }
 
   @Override
   public ConcurrentMap<String, String> getCacheMap(String namespaceKey)
   {
-      return new ConcurrentHashMap<>();
+    if(swapMaps.containsKey(namespaceKey)){
+      ConcurrentMap<String, String> map = swapMaps.get(namespaceKey).get();
+      log.info("Returned existing JDBC callback map for table %s, cached: %s", namespaceKey,
+              ((JDBCcallbackMap)map).getCachedSize());
+      return map;
+    }else {
+      JDBCcallbackMap map = new JDBCcallbackMap();
+      swapMaps.put(namespaceKey, new WeakReference<>((ConcurrentMap<String, String>) map));
+      log.info("Returned a new JDBC callback instance for %s", namespaceKey);
+      return map;
+    }
+  }
+
+  public class JDBCcallbackMap implements ConcurrentMap<String, String> {
+
+    String table;
+    String keyCol;
+    String valueCol;
+    DBI dbi;
+    Connection conn;
+    private ConcurrentMap<String, String> cache = new ConcurrentHashMap<>();
+
+    public long getCachedSize() {
+      return cache.size();
+    }
+    public JDBCcallbackMap setTable(String table) {
+      this.table = table;
+      return this;
+    }
+    public JDBCcallbackMap setKeyCol(String keyCol) {
+      this.keyCol = keyCol;
+      return this;
+    }
+    public JDBCcallbackMap setValueCol(String valueCol) {
+      this.valueCol = valueCol;
+      return this;
+    }
+    public JDBCcallbackMap setDBI(DBI dbi) {
+      this.dbi = dbi;
+      this.conn = dbi.open().getConnection();
+      return this;
+    }
+
+    @Override
+    public int size() {
+      return 0;
+    }
+
+    @Override
+    public boolean isEmpty() {
+      return false;
+    }
+
+    @Override
+    public boolean containsKey(Object o) {
+      return true;
+    }
+
+    @Override
+    public boolean containsValue(Object o) {
+      return false;
+    }
+
+    @Override
+    public String get(Object o) {
+      if(cache.containsKey(o)){
+       return cache.get(o);
+      }else {
+        String query = String.format(
+                "SELECT %s FROM %s WHERE %s = ?",
+                valueCol,
+                table,
+                keyCol
+        );
+        try {
+          PreparedStatement st = conn.prepareStatement(query);
+          st.setString(1, (String) o);
+
+          ResultSet res = st.executeQuery();
+
+          if (res.next()) {
+            cache.put((String) o, res.getString(valueCol));
+            return res.getString(valueCol);
+          }
+        } catch (SQLException e) {
+          e.printStackTrace();
+        }
+        return null;
+      }
+    }
+
+    @Override
+    public String put(String s, String s2) {
+      return null;
+    }
+
+    @Override
+    public String remove(Object o) {
+      return null;
+    }
+
+    @Override
+    public void putAll(@NotNull Map<? extends String, ? extends String> map) {
+
+    }
+
+    @Override
+    public void clear() {
+
+    }
+
+    @NotNull
+    @Override
+    public Set<String> keySet() {
+      return null;
+    }
+
+    @NotNull
+    @Override
+    public Collection<String> values() {
+      return null;
+    }
+
+    @NotNull
+    @Override
+    public Set<Entry<String, String>> entrySet() {
+      return null;
+    }
+
+    @Override
+    public String putIfAbsent(@NotNull String s, String s2) {
+      return null;
+    }
+
+    @Override
+    public boolean remove(@NotNull Object o, Object o1) {
+      return false;
+    }
+
+    @Override
+    public boolean replace(@NotNull String s, @NotNull String s2, @NotNull String v1) {
+      return false;
+    }
+
+    @Override
+    public String replace(@NotNull String s, @NotNull String s2) {
+      return null;
+    }
   }
 
   @Override
   protected void monitor(ServiceEmitter serviceEmitter)
   {
-    serviceEmitter.emit(ServiceMetricEvent.builder().build("namespace/cache/diskSize", tmpFile.length()));
+//    serviceEmitter.emit(ServiceMetricEvent.builder().build("namespace/cache/diskSize", tmpFile.length()));
   }
 }
