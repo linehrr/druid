@@ -47,7 +47,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   private static final Logger log = new Logger(OffHeapNamespaceExtractionCacheManager.class);
   private Striped<Lock> nsLocks = Striped.lazyWeakLock(1024); // Needed to make sure delete() doesn't do weird things
 
-  private final ConcurrentMap<String, WeakReference<ConcurrentMap<String, String>>> swapMaps = new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, ConcurrentMap<String, String>> swapMaps = new ConcurrentHashMap<>();
 
   @Inject
   public OffHeapNamespaceExtractionCacheManager(
@@ -93,13 +93,13 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   public ConcurrentMap<String, String> getCacheMap(String namespaceKey)
   {
     if(swapMaps.containsKey(namespaceKey)){
-      ConcurrentMap<String, String> map = swapMaps.get(namespaceKey).get();
+      ConcurrentMap<String, String> map = swapMaps.get(namespaceKey);
       log.info("Returned existing JDBC callback map for table %s, cached: %s", namespaceKey,
-              ((JDBCcallbackMap)map).getCachedSize());
+              map.size());
       return map;
     }else {
       JDBCcallbackMap map = new JDBCcallbackMap();
-      swapMaps.put(namespaceKey, new WeakReference<>((ConcurrentMap<String, String>) map));
+      swapMaps.put(namespaceKey,  map);
       log.info("Returned a new JDBC callback instance for %s", namespaceKey);
       return map;
     }
@@ -114,9 +114,6 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     Connection conn;
     private ConcurrentMap<String, String> cache = new ConcurrentHashMap<>();
 
-    public long getCachedSize() {
-      return cache.size();
-    }
     public JDBCcallbackMap setTable(String table) {
       this.table = table;
       return this;
@@ -137,7 +134,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
 
     @Override
     public int size() {
-      return 0;
+      return cache.size();
     }
 
     @Override
