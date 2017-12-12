@@ -72,7 +72,6 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     }
     onDiskDB = DBMaker
         .fileDB(tmpFile)
-        .fileMmapEnableIfSupported()
         .fileDeleteAfterClose()
         .closeOnJvmShutdown()
         .make();
