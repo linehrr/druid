@@ -20,6 +20,8 @@
 package io.druid.server.lookup.namespace.cache;
 
 import com.google.common.base.Throwables;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.util.concurrent.Striped;
 import com.google.inject.Inject;
 import com.metamx.common.lifecycle.Lifecycle;
@@ -30,13 +32,16 @@ import io.druid.query.lookup.namespace.ExtractionNamespaceCacheFactory;
 import org.jetbrains.annotations.NotNull;
 import org.skife.jdbi.v2.DBI;
 
-import java.lang.ref.WeakReference;
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 
 /**
@@ -112,7 +117,14 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     String valueCol;
     DBI dbi;
     Connection conn;
-    private ConcurrentMap<String, String> cache = new ConcurrentHashMap<>();
+    private Cache<Object, String> cache = CacheBuilder.newBuilder()
+            .concurrencyLevel(4)
+            .expireAfterAccess(24, TimeUnit.HOURS)
+            .initialCapacity(1024)
+            .maximumSize(1_00_000)
+            .build();
+    private ConcurrentMap<Object, String> cacheMap = cache.asMap();
+
 
     public JDBCcallbackMap setTable(String table) {
       this.table = table;
@@ -134,7 +146,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
 
     @Override
     public int size() {
-      return cache.size();
+      return cacheMap.size();
     }
 
     @Override
@@ -154,8 +166,8 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
 
     @Override
     public String get(Object o) {
-      if(cache.containsKey(o)){
-       return cache.get(o);
+      if(cacheMap.containsKey(o)){
+       return cacheMap.get(o);
       }else {
         String query = String.format(
                 "SELECT %s FROM %s WHERE %s = ?",
@@ -170,7 +182,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
           ResultSet res = st.executeQuery();
 
           if (res.next()) {
-            cache.put((String) o, res.getString(valueCol));
+            cache.put(o, res.getString(valueCol));
             return res.getString(valueCol);
           }
         } catch (SQLException e) {
