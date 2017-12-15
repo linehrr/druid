@@ -23,14 +23,8 @@ import com.metamx.common.logger.Logger;
 import io.druid.query.lookup.namespace.ExtractionNamespaceCacheFactory;
 import io.druid.query.lookup.namespace.JDBCExtractionNamespace;
 import io.druid.server.lookup.namespace.cache.OffHeapNamespaceExtractionCacheManager;
-import org.skife.jdbi.v2.DBI;
-import org.skife.jdbi.v2.Handle;
-import org.skife.jdbi.v2.StatementContext;
-import org.skife.jdbi.v2.tweak.HandleCallback;
-import org.skife.jdbi.v2.tweak.ResultSetMapper;
+import org.apache.commons.dbcp2.BasicDataSource;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
@@ -43,7 +37,7 @@ public class JDBCExtractionNamespaceCacheFactory
     implements ExtractionNamespaceCacheFactory<JDBCExtractionNamespace>
 {
   private static final Logger LOG = new Logger(JDBCExtractionNamespaceCacheFactory.class);
-  private final ConcurrentMap<String, DBI> dbiCache = new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, BasicDataSource> connPools = new ConcurrentHashMap<>();
 
   @Override
   public Callable<String> getCachePopulator(
@@ -62,7 +56,7 @@ public class JDBCExtractionNamespaceCacheFactory
                 .setKeyCol(namespace.getKeyColumn())
                 .setTable(namespace.getTable())
                 .setValueCol(namespace.getValueColumn())
-                .setDBI(ensureDBI(id, namespace));
+                .setDBI(getConnectionPool(namespace));
 
         LOG.info("Setup %s-%s-%s ready!", namespace.getTable(), namespace.getKeyColumn(), namespace.getValueColumn());
         return String.format("%s-%s-%s", namespace.getTable(), namespace.getKeyColumn(), namespace.getValueColumn());
@@ -70,60 +64,33 @@ public class JDBCExtractionNamespaceCacheFactory
     };
   }
 
-  private DBI ensureDBI(String id, JDBCExtractionNamespace namespace)
+  private BasicDataSource getConnectionPool(JDBCExtractionNamespace namespace)
   {
-    final String key = id;
-    DBI dbi = null;
-    if (dbiCache.containsKey(key)) {
-      dbi = dbiCache.get(key);
-    }
-    if (dbi == null) {
-      final DBI newDbi = new DBI(
-          namespace.getConnectorConfig().getConnectURI(),
-          namespace.getConnectorConfig().getUser(),
-          namespace.getConnectorConfig().getPassword()
-      );
-      dbiCache.putIfAbsent(key, newDbi);
-      dbi = dbiCache.get(key);
-    }
-    return dbi;
-  }
-
-  private Long lastUpdates(String id, JDBCExtractionNamespace namespace)
-  {
-    final DBI dbi = ensureDBI(id, namespace);
-    final String table = namespace.getTable();
-    final String tsColumn = namespace.getTsColumn();
-    final String LATEST = "latest";
-
-    if (tsColumn == null) {
-      return null;
-    }
-    final Long update = dbi.withHandle(
-        new HandleCallback<Long>()
-        {
-
-          @Override
-          public Long withHandle(Handle handle) throws Exception
-          {
-            final String query = String.format(
-                "SELECT MAX(UNIX_TIMESTAMP(%s)) AS %s FROM %s",
-                tsColumn, LATEST, table
+    String url = namespace.getConnectorConfig().getConnectURI();
+    String poolKey = String.format("%s-%s-%s",
+            url,
+            namespace.getConnectorConfig().getUser(),
+            namespace.getConnectorConfig().getPassword()
             );
-            return handle
-                .createQuery(query)
-                .map(
-                        new ResultSetMapper<Long>() {
 
-                          @Override
-                          public Long map(int i, ResultSet resultSet, StatementContext statementContext) throws SQLException {
-                            return resultSet.getLong(LATEST);
-                          }
-                        }
-                ).first();
-          }
-        }
-    );
-    return update;
+    BasicDataSource pool;
+    if (connPools.containsKey(poolKey)) {
+      LOG.info("Return existing pool for url: %s", url);
+      pool = connPools.get(poolKey);
+    }else{
+      LOG.info("Creating new connection pool for url: %s", url);
+
+      pool = new BasicDataSource();
+      pool.setDriverClassName("com.mysql.jdbc.Driver");
+      pool.setUrl(url);
+      pool.setUsername(namespace.getConnectorConfig().getUser());
+      pool.setPassword(namespace.getConnectorConfig().getPassword());
+      pool.setMaxTotal(4);
+      pool.setMinIdle(0);
+
+      connPools.putIfAbsent(poolKey, pool);
+    }
+    return pool;
   }
+
 }

@@ -22,15 +22,14 @@ package io.druid.server.lookup.namespace.cache;
 import com.google.common.base.Throwables;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
-import com.google.common.util.concurrent.Striped;
 import com.google.inject.Inject;
 import com.metamx.common.lifecycle.Lifecycle;
 import com.metamx.common.logger.Logger;
 import com.metamx.emitter.service.ServiceEmitter;
 import io.druid.query.lookup.namespace.ExtractionNamespace;
 import io.druid.query.lookup.namespace.ExtractionNamespaceCacheFactory;
+import org.apache.commons.dbcp2.BasicDataSource;
 import org.jetbrains.annotations.NotNull;
-import org.skife.jdbi.v2.DBI;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -42,7 +41,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Lock;
 
 /**
  *
@@ -50,8 +48,6 @@ import java.util.concurrent.locks.Lock;
 public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionCacheManager
 {
   private static final Logger log = new Logger(OffHeapNamespaceExtractionCacheManager.class);
-  private Striped<Lock> nsLocks = Striped.lazyWeakLock(1024); // Needed to make sure delete() doesn't do weird things
-
   private final ConcurrentMap<String, ConcurrentMap<String, String>> swapMaps = new ConcurrentHashMap<>();
 
   @Inject
@@ -115,8 +111,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     String table;
     String keyCol;
     String valueCol;
-    DBI dbi;
-    Connection conn;
+    BasicDataSource pool;
     private Cache<Object, String> cache = CacheBuilder.newBuilder()
             .concurrencyLevel(4)
             .expireAfterAccess(24, TimeUnit.HOURS)
@@ -124,7 +119,6 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
             .maximumSize(1_00_000)
             .build();
     private ConcurrentMap<Object, String> cacheMap = cache.asMap();
-
 
     public JDBCcallbackMap setTable(String table) {
       this.table = table;
@@ -138,9 +132,8 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
       this.valueCol = valueCol;
       return this;
     }
-    public JDBCcallbackMap setDBI(DBI dbi) {
-      this.dbi = dbi;
-      this.conn = dbi.open().getConnection();
+    public JDBCcallbackMap setDBI(BasicDataSource pool) throws SQLException {
+      this.pool = pool;
       return this;
     }
 
@@ -175,15 +168,20 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
                 table,
                 keyCol
         );
-        try {
-          PreparedStatement st = conn.prepareStatement(query);
+
+
+        try(
+            Connection conn = pool.getConnection();
+            PreparedStatement st = conn.prepareStatement(query))
+        {
           st.setString(1, (String) o);
 
-          ResultSet res = st.executeQuery();
-
-          if (res.next()) {
-            cache.put(o, res.getString(valueCol));
-            return res.getString(valueCol);
+          try( ResultSet res = st.executeQuery() ) {
+            if (res.next()) {
+              log.debug("loaded key/value: %s -> %s", o, res.getString(valueCol));
+              cache.put(o, res.getString(valueCol));
+              return res.getString(valueCol);
+            }
           }
         } catch (SQLException e) {
           e.printStackTrace();
